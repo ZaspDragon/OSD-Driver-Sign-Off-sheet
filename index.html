@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>OSD Driver Sign-Off</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+body{font-family:sans-serif;background:#f6f7fb;margin:0;padding:20px;color:#111}
+input,textarea,select,button{margin:5px 0;padding:8px;border-radius:8px;border:1px solid #ccc;width:100%}
+canvas{border:1px solid #ccc;width:100%;height:160px}
+.thumbs img{max-width:100px;margin:4px;border-radius:6px}
+.btn{background:#4f46e5;color:#fff;border:none;border-radius:8px;padding:10px 14px;cursor:pointer}
+.btn-ghost{background:#eef2ff;color:#111}
+</style>
+</head>
+<body>
+<h1>OSD Driver Sign-Off</h1>
+<form id="osdForm">
+<label>Date/Time</label><input type="datetime-local" id="date"/>
+<label>Carrier *</label><input id="carrier" required/>
+<label>Driver Name *</label><input id="driverName" required/>
+<label>Driver ID</label><input id="driverId"/>
+<label>Photo of BOL (use camera)</label><input type="file" id="bolPhoto" accept="image/*" capture="environment"/>
+<div id="bolPreview" class="thumbs"></div>
+<label>BOL #</label><input id="bol"/>
+<label>PO #</label><input id="po"/>
+<label>Notes</label><textarea id="notes"></textarea>
+<label>Signature *</label><canvas id="sigCanvas"></canvas><button type="button" id="clearSig" class="btn-ghost">Clear</button>
+<button class="btn" id="submitBtn">Submit (Generate & Email PDF)</button>
+<button type="button" class="btn-ghost" id="mailtoBtn">Send via Email App</button>
+</form>
+<div id="alert"></div>
+<script>
+const BACKEND_URL='https://YOUR-RENDER-URL.onrender.com';
+const d=new Date();document.getElementById('date').value=d.toISOString().slice(0,16);
+const canvas=document.getElementById('sigCanvas');const ctx=canvas.getContext('2d');
+function resize(){canvas.width=canvas.clientWidth;canvas.height=160;}resize();
+let sig='',draw=false;canvas.addEventListener('mousedown',e=>{draw=true;ctx.beginPath();ctx.moveTo(e.offsetX,e.offsetY)});
+canvas.addEventListener('mousemove',e=>{if(!draw)return;ctx.lineTo(e.offsetX,e.offsetY);ctx.stroke();sig=canvas.toDataURL()});
+window.addEventListener('mouseup',()=>draw=false);
+document.getElementById('clearSig').onclick=()=>{ctx.clearRect(0,0,canvas.width,canvas.height);sig=''};
+const bol=document.getElementById('bolPhoto'),bolPreview=document.getElementById('bolPreview');
+bol.addEventListener('change',async()=>{bolPreview.innerHTML='';const f=bol.files[0];if(!f)return;
+const u=URL.createObjectURL(f);const i=document.createElement('img');i.src=u;bolPreview.appendChild(i);
+const {data}=await Tesseract.recognize(u,'eng');const t=data.text||'';const b=t.match(/BOL\s*[:#-]?\s*([A-Z0-9-]+)/i);
+if(b)document.getElementById('bol').value=b[1];const p=t.match(/PO\s*[:#-]?\s*([A-Z0-9-]+)/i);if(p)document.getElementById('po').value=p[1];});
+document.getElementById('mailtoBtn').onclick=()=>{const name=driverName.value||'Driver';const subj='OSD Sign-Off '+name;
+const body=encodeURIComponent(`Driver: ${name}\nCarrier: ${carrier.value}\nNotes: ${notes.value}`);
+window.location.href=`mailto:?subject=${encodeURIComponent(subj)}&body=${body}`;};
+document.getElementById('osdForm').addEventListener('submit',async e=>{
+e.preventDefault();const a=document.getElementById('alert');
+if(!sig){a.textContent='Signature required';return;}
+const payload={date:date.value,carrier:carrier.value,driverName:driverName.value,driverId:driverId.value,
+bol:bol.value,po:po.value,notes:notes.value,signatureDataUrl:sig};
+try{const r=await fetch(BACKEND_URL+'/api/osd/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const out=await r.json();a.textContent='Submitted '+(out.ref||'');}catch(e){a.textContent='Error '+e.message;}
+});
+</script>
+</body></html>
