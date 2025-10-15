@@ -1,60 +1,598 @@
-<!doctype html>
+# Update/build a new bundle that supports:
+# - Photo OR PDF upload for BOL (with image OCR when image is provided)
+# - Optional "Digital BOL Link / Load Number" text field
+# - Keeps door 100–140 dropdown, signature required, only Driver Name + Carrier + Signature mandatory
+# - Backend attaches BOL PDF if provided, embeds BOL photo into the generated PDF, and prints the link/number
+# Then zip for download.
+
+import os, json, zipfile, textwrap
+
+root = "/mnt/data/osd_webform_paperless"
+frontend_dir = os.path.join(root, "frontend")
+server_dir = os.path.join(root, "server")
+os.makedirs(frontend_dir, exist_ok=True)
+os.makedirs(server_dir, exist_ok=True)
+
+index_html = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>OSD Driver Sign-Off</title>
+<link rel="icon" href="data:,">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
-body{font-family:sans-serif;background:#f6f7fb;margin:0;padding:20px;color:#111}
-input,textarea,select,button{margin:5px 0;padding:8px;border-radius:8px;border:1px solid #ccc;width:100%}
-canvas{border:1px solid #ccc;width:100%;height:160px}
-.thumbs img{max-width:100px;margin:4px;border-radius:6px}
-.btn{background:#4f46e5;color:#fff;border:none;border-radius:8px;padding:10px 14px;cursor:pointer}
-.btn-ghost{background:#eef2ff;color:#111}
+  :root{--ink:#0f172a;--muted:#64748b;--line:#e5e7eb;--brand:#4f46e5;--bg:#f6f7fb}
+  *{box-sizing:border-box}
+  body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:var(--ink);margin:0}
+  .container{max-width:960px;margin:24px auto;padding:0 16px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.05);padding:16px;margin-bottom:16px}
+  h1{font-size:28px;margin:8px 0 16px}
+  label{display:block;font-size:13px;color:#475569;margin:8px 0 6px}
+  input,textarea,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px;outline:none;background:#fff}
+  input:focus,textarea:focus,select:focus{border-color:var(--brand)}
+  .grid{display:grid;gap:12px}
+  @media(min-width:820px){.grid-2{grid-template-columns:1fr 1fr}}
+  .btn{background:var(--brand);color:#fff;border:none;border-radius:12px;padding:10px 16px;font-weight:600;cursor:pointer}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .btn-ghost{background:#eef2ff;color:#111827;border:none;border-radius:12px;padding:10px 16px;font-weight:600;cursor:pointer}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .muted{color:var(--muted);font-size:12px}
+  .sig{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .sigbar{display:flex;justify-content:space-between;align-items:center;background:#f8fafc;border-bottom:1px solid var(--line);padding:8px 10px}
+  canvas{display:block;width:100%;height:180px}
+  .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+  .thumbs img{width:100%;height:100px;object-fit:cover;border:1px solid var(--line);border-radius:8px}
+  .pill{display:inline-block;padding:2px 8px;border:1px solid var(--line);border-radius:999px;font-size:12px;color:#334155;background:#f8fafc}
+  .success{background:#ecfdf5;border:1px solid #10b98133;color:#065f46;padding:10px 12px;border-radius:12px}
+  .error{background:#fef2f2;border:1px solid #ef444433;color:#7f1d1d;padding:10px 12px;border-radius:12px}
 </style>
 </head>
 <body>
-<h1>OSD Driver Sign-Off</h1>
-<form id="osdForm">
-<label>Date/Time</label><input type="datetime-local" id="date"/>
-<label>Carrier *</label><input id="carrier" required/>
-<label>Driver Name *</label><input id="driverName" required/>
-<label>Driver ID</label><input id="driverId"/>
-<label>Photo of BOL (use camera)</label><input type="file" id="bolPhoto" accept="image/*" capture="environment"/>
-<div id="bolPreview" class="thumbs"></div>
-<label>BOL #</label><input id="bol"/>
-<label>PO #</label><input id="po"/>
-<label>Notes</label><textarea id="notes"></textarea>
-<label>Signature *</label><canvas id="sigCanvas"></canvas><button type="button" id="clearSig" class="btn-ghost">Clear</button>
-<button class="btn" id="submitBtn">Submit (Generate & Email PDF)</button>
-<button type="button" class="btn-ghost" id="mailtoBtn">Send via Email App</button>
-</form>
-<div id="alert"></div>
+<div class="container">
+  <h1>OSD – Driver Sign-Off</h1>
+  <div id="alert"></div>
+
+  <form id="osdForm" class="card">
+    <div class="grid grid-2">
+      <div>
+        <label>Date/Time</label>
+        <input type="datetime-local" name="date" id="date"/>
+      </div>
+
+      <div>
+        <label>Location (Door # 100–140)</label>
+        <select name="location" id="location">
+          <option value="">Select Door</option>
+        </select>
+      </div>
+
+      <div>
+        <label>Load ID / BOL #</label>
+        <input name="bol" id="bol"/>
+      </div>
+      <div>
+        <label>PO Number</label>
+        <input name="po" id="po"/>
+      </div>
+
+      <div style="grid-column:1/-1">
+        <label>Photo or PDF of BOL <span id="ocrStatus" class="muted"></span></label>
+        <input type="file" id="bolFile" accept="image/*,application/pdf"/>
+        <div class="thumbs" id="bolPreview"></div>
+        <div id="bolPdfBadge" class="pill" style="display:none">BOL PDF attached</div>
+      </div>
+
+      <div style="grid-column:1/-1">
+        <label>Digital BOL Link / Load Number (optional)</label>
+        <input type="text" id="bolLink" placeholder="Paste a link to the BOL or enter the load number"/>
+      </div>
+
+      <div>
+        <label>Stop #</label>
+        <input name="stop" id="stop"/>
+      </div>
+      <div>
+        <label>Carrier *</label>
+        <input name="carrier" id="carrier" required/>
+      </div>
+      <div>
+        <label>Vendor ID</label>
+        <input name="vendorId" id="vendorId"/>
+      </div>
+      <div>
+        <label>Vendor Name</label>
+        <input name="vendorName" id="vendorName"/>
+      </div>
+    </div>
+
+    <label>Notes / Exceptions</label>
+    <textarea name="notes" id="notes" rows="5" placeholder="Possible damages, shortages, and overages..."></textarea>
+
+    <div class="row">
+      <div style="flex:1">
+        <label>Driver Name *</label>
+        <input name="driverName" id="driverName" required/>
+      </div>
+      <div style="flex:1">
+        <label>Driver ID / License (optional)</label>
+        <input name="driverId" id="driverId"/>
+      </div>
+    </div>
+
+    <div class="sig" style="margin-top:12px">
+      <div class="sigbar">
+        <span class="muted">Driver signature (draw in the box) *</span>
+        <button type="button" class="btn-ghost" id="clearSig">Clear</button>
+      </div>
+      <canvas id="sigCanvas"></canvas>
+    </div>
+
+    <div style="margin-top:12px">
+      <label>Photos (optional)</label>
+      <input type="file" id="photos" multiple accept="image/*"/>
+      <div class="thumbs" id="thumbs"></div>
+    </div>
+
+    <div class="row" style="justify-content:space-between;margin-top:12px">
+      <button type="button" class="btn-ghost" id="mailtoBtn">Send via Email App</button>
+      <button class="btn" id="submitBtn">Submit (Generate & Email PDF)</button>
+    </div>
+  </form>
+
+  <p class="muted">Set your backend URL inside the script to enable PDF emailing.</p>
+</div>
+
 <script>
-const BACKEND_URL='https://YOUR-RENDER-URL.onrender.com';
-const d=new Date();document.getElementById('date').value=d.toISOString().slice(0,16);
-const canvas=document.getElementById('sigCanvas');const ctx=canvas.getContext('2d');
-function resize(){canvas.width=canvas.clientWidth;canvas.height=160;}resize();
-let sig='',draw=false;canvas.addEventListener('mousedown',e=>{draw=true;ctx.beginPath();ctx.moveTo(e.offsetX,e.offsetY)});
-canvas.addEventListener('mousemove',e=>{if(!draw)return;ctx.lineTo(e.offsetX,e.offsetY);ctx.stroke();sig=canvas.toDataURL()});
-window.addEventListener('mouseup',()=>draw=false);
-document.getElementById('clearSig').onclick=()=>{ctx.clearRect(0,0,canvas.width,canvas.height);sig=''};
-const bol=document.getElementById('bolPhoto'),bolPreview=document.getElementById('bolPreview');
-bol.addEventListener('change',async()=>{bolPreview.innerHTML='';const f=bol.files[0];if(!f)return;
-const u=URL.createObjectURL(f);const i=document.createElement('img');i.src=u;bolPreview.appendChild(i);
-const {data}=await Tesseract.recognize(u,'eng');const t=data.text||'';const b=t.match(/BOL\s*[:#-]?\s*([A-Z0-9-]+)/i);
-if(b)document.getElementById('bol').value=b[1];const p=t.match(/PO\s*[:#-]?\s*([A-Z0-9-]+)/i);if(p)document.getElementById('po').value=p[1];});
-document.getElementById('mailtoBtn').onclick=()=>{const name=driverName.value||'Driver';const subj='OSD Sign-Off '+name;
-const body=encodeURIComponent(`Driver: ${name}\nCarrier: ${carrier.value}\nNotes: ${notes.value}`);
-window.location.href=`mailto:?subject=${encodeURIComponent(subj)}&body=${body}`;};
-document.getElementById('osdForm').addEventListener('submit',async e=>{
-e.preventDefault();const a=document.getElementById('alert');
-if(!sig){a.textContent='Signature required';return;}
-const payload={date:date.value,carrier:carrier.value,driverName:driverName.value,driverId:driverId.value,
-bol:bol.value,po:po.value,notes:notes.value,signatureDataUrl:sig};
-try{const r=await fetch(BACKEND_URL+'/api/osd/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-const out=await r.json();a.textContent='Submitted '+(out.ref||'');}catch(e){a.textContent='Error '+e.message;}
-});
+  // ======== CONFIG ========
+  const BACKEND_URL = 'https://YOUR-RENDER-URL.onrender.com'; // <-- change after backend deploy
+  // ========================
+
+  // Populate door numbers 100–140
+  (function() {
+    const sel = document.getElementById('location');
+    for (let i = 100; i <= 140; i++) {
+      const opt = document.createElement('option');
+      opt.value = `Door ${i}`;
+      opt.textContent = `Door ${i}`;
+      sel.appendChild(opt);
+    }
+  })();
+
+  // Prefill local datetime
+  (function(){
+    const d = new Date();
+    const p = n => String(n).padStart(2,'0');
+    const val = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+    document.getElementById('date').value = val;
+  })();
+
+  // Signature pad
+  const canvas = document.getElementById('sigCanvas');
+  const ctx = canvas.getContext('2d');
+  let drawing = false, last=[0,0], signatureDataUrl = '';
+  function resize(){
+    const ratio = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || canvas.parentElement.clientWidth; const h = 180;
+    canvas.width = Math.floor(w * ratio); canvas.height = Math.floor(h * ratio);
+    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.lineWidth = 2.5; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='#111827';
+  }
+  new ResizeObserver(resize).observe(canvas); resize();
+  const pos = e => { const r=canvas.getBoundingClientRect(); const t=e.touches?.[0]; const x=(t?t.clientX:e.clientX)-r.left; const y=(t?t.clientY:e.clientY)-r.top; return [x,y]; };
+  const down = e => { e.preventDefault(); drawing=true; last=pos(e)};
+  const move = e => { if(!drawing) return; const p=pos(e); ctx.beginPath(); ctx.moveTo(...last); ctx.lineTo(...p); ctx.stroke(); last=p };
+  const up = () => { drawing=false; signatureDataUrl = canvas.toDataURL('image/png'); };
+  canvas.addEventListener('mousedown',down); canvas.addEventListener('mousemove',move); window.addEventListener('mouseup',up);
+  canvas.addEventListener('touchstart',down,{passive:false}); canvas.addEventListener('touchmove',move,{passive:false}); window.addEventListener('touchend',up);
+  document.getElementById('clearSig').onclick = () => { ctx.clearRect(0,0,canvas.width,canvas.height); signatureDataUrl = '' };
+
+  // Photo previews + compression (gallery)
+  const photosInput = document.getElementById('photos');
+  const thumbs = document.getElementById('thumbs');
+  photosInput.addEventListener('change', () => {
+    thumbs.innerHTML='';
+    [...photosInput.files].forEach(file => {
+      const url = URL.createObjectURL(file);
+      const img = document.createElement('img'); img.src = url; img.onload = () => URL.revokeObjectURL(url);
+      thumbs.appendChild(img);
+    });
+  });
+
+  // BOL: image OR PDF
+  const bolFile = document.getElementById('bolFile');
+  const bolPreview = document.getElementById('bolPreview');
+  const bolPdfBadge = document.getElementById('bolPdfBadge');
+  let bolPhotoDataUrl = '';
+  let bolPdfDataUrl = '';
+
+  bolFile.addEventListener('change', async () => {
+    bolPreview.innerHTML=''; bolPdfBadge.style.display='none'; bolPhotoDataUrl=''; bolPdfDataUrl='';
+    const f = bolFile.files?.[0]; if(!f) return;
+
+    if (f.type && f.type.startsWith('image/')) {
+      // Show preview
+      const url = URL.createObjectURL(f);
+      const img = document.createElement('img');
+      img.src = url; img.onload = () => URL.revokeObjectURL(url);
+      bolPreview.appendChild(img);
+
+      // OCR to fill fields
+      try{
+        const { data } = await Tesseract.recognize(url, 'eng');
+        const text = data.text || '';
+        const bolMatch = text.match(/(?:BOL|Bill of Lading|Load ID)\\s*[:#-]?\\s*([A-Z0-9-]+)/i);
+        const poMatch  = text.match(/(?:PO|P\\.?O\\.?|Purchase Order)\\s*[:#-]?\\s*([A-Z0-9-]+)/i);
+        if(bolMatch && !document.getElementById('bol').value) document.getElementById('bol').value = bolMatch[1];
+        if(poMatch  && !document.getElementById('po').value)  document.getElementById('po').value  = poMatch[1];
+      }catch(e){ /* ignore OCR failure */ }
+
+      // Compress to JPEG data URL for backend
+      bolPhotoDataUrl = await readImageAsDataURL(f);
+    } else if (f.type === 'application/pdf' || f.name.toLowerCase().endswith('.pdf')) {
+      // Read as DataURL and mark attached (we will attach it on the server email)
+      const reader = new FileReader();
+      bolPdfDataUrl = await new Promise((resolve, reject) => {
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(f);
+      });
+      bolPdfBadge.style.display='inline-block';
+    } else {
+      // Unknown type; try best-effort read
+      const reader = new FileReader();
+      reader.onload = () => { bolPdfDataUrl = reader.result; bolPdfBadge.style.display='inline-block'; };
+      reader.readAsDataURL(f);
+    }
+  });
+
+  function readImageAsDataURL(file, maxW=1600, maxH=1600, quality=0.85){
+    return new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const ratio = Math.min(1, maxW/img.width, maxH/img.height);
+          const c = document.createElement('canvas');
+          c.width = Math.round(img.width*ratio);
+          c.height = Math.round(img.height*ratio);
+          const cx = c.getContext('2d');
+          cx.drawImage(img,0,0,c.width,c.height);
+          resolve(c.toDataURL('image/jpeg', quality));
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Mailto fallback
+  document.getElementById('mailtoBtn').addEventListener('click', () => {
+    const fields = {
+      date: document.getElementById('date').value,
+      location: document.getElementById('location').value,
+      bol: document.getElementById('bol').value,
+      po: document.getElementById('po').value,
+      bolLink: document.getElementById('bolLink').value,
+      stop: document.getElementById('stop').value,
+      carrier: document.getElementById('carrier').value,
+      vendorId: document.getElementById('vendorId').value,
+      vendorName: document.getElementById('vendorName').value,
+      notes: document.getElementById('notes').value,
+      driverName: document.getElementById('driverName').value,
+      driverId: document.getElementById('driverId').value
+    };
+    const subject = encodeURIComponent(`OSD Sign-Off: ${fields.driverName || 'Driver'} / ${fields.carrier || ''}`);
+    const body = [
+      'OSD – Driver Sign-Off (manual email)',
+      '',
+      `Date/Time: ${fields.date}`,
+      `Location: ${fields.location}`,
+      `BOL #: ${fields.bol}`,
+      `PO #: ${fields.po}`,
+      `Digital BOL Link / Load #: ${fields.bolLink}`,
+      `Stop #: ${fields.stop}`,
+      `Carrier: ${fields.carrier}`,
+      `Vendor ID: ${fields.vendorId}`,
+      `Vendor Name: ${fields.vendorName}`,
+      '',
+      `Driver: ${fields.driverName}`,
+      `Driver ID: ${fields.driverId}`,
+      '',
+      'Notes:',
+      fields.notes || '(none)',
+      '',
+      'Attachments: Please attach the BOL (photo or PDF) if needed.'
+    ].join('\\n');
+    const href = `mailto:?subject=${subject}&body=${encodeURIComponent(body)}`;
+    window.location.href = href;
+  });
+
+  // Submit handler -> POST JSON to backend
+  document.getElementById('osdForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const alertBox = document.getElementById('alert');
+    alertBox.innerHTML='';
+
+    if(!BACKEND_URL || BACKEND_URL.includes('YOUR-RENDER-URL')){
+      alertBox.innerHTML = `<div class="error">Set BACKEND_URL inside the script after you deploy the backend.</div>`; return;
+    }
+
+    const driverName = document.getElementById('driverName').value.trim();
+    const carrierVal = document.getElementById('carrier').value.trim();
+    if(!driverName || !carrierVal){ alertBox.innerHTML = `<div class="error">Driver Name and Carrier are required.</div>`; return; }
+    if(!signatureDataUrl){ alertBox.innerHTML = `<div class="error">Signature is required.</div>`; return; }
+
+    document.getElementById('submitBtn').disabled = true;
+
+    // convert gallery photos
+    const files = [...photosInput.files];
+    const photos = [];
+    for(const f of files){ photos.push({ name: f.name, dataUrl: await readImageAsDataURL(f) }); }
+
+    const payload = {
+      date: document.getElementById('date').value,
+      location: document.getElementById('location').value,
+      bol: document.getElementById('bol').value,
+      po: document.getElementById('po').value,
+      bolLink: document.getElementById('bolLink').value,
+      stop: document.getElementById('stop').value,
+      carrier: carrierVal,
+      vendorId: document.getElementById('vendorId').value,
+      vendorName: document.getElementById('vendorName').value,
+      notes: document.getElementById('notes').value,
+      driverName, driverId: document.getElementById('driverId').value,
+      signatureDataUrl,
+      bolPhotoDataUrl,
+      bolPdfDataUrl,
+      photos,
+      device: navigator.userAgent,
+      submittedAt: new Date().toISOString()
+    };
+
+    try{
+      const resp = await fetch(BACKEND_URL + '/api/osd/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const out = await resp.json().catch(()=>({}));
+      if(!resp.ok) throw new Error(out.error || 'Submit failed');
+      alertBox.innerHTML = `<div class="success">Submitted! PDF emailed and stored. Ref: ${out.ref || ''}</div>`;
+      document.getElementById('osdForm').reset();
+      ctx.clearRect(0,0,canvas.width,canvas.height); signatureDataUrl=''; thumbs.innerHTML=''; bolPreview.innerHTML=''; bolPdfBadge.style.display='none'; bolPhotoDataUrl=''; bolPdfDataUrl='';
+    }catch(err){
+      alertBox.innerHTML = `<div class="error">${err.message}</div>`;
+    }finally{
+      document.getElementById('submitBtn').disabled = false;
+    }
+  });
 </script>
-</body></html>
+</body>
+</html>
+"""
+with open(os.path.join(frontend_dir, "index.html"), "w", encoding="utf-8") as f:
+    f.write(index_html)
+
+package_json = {
+  "name": "osd-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "nodemailer": "^6.9.13",
+    "pdfkit": "^0.15.0",
+    "uuid": "^9.0.1"
+  }
+}
+with open(os.path.join(server_dir, "package.json"), "w", encoding="utf-8") as f:
+    json.dump(package_json, f, indent=2)
+
+server_js = """import express from 'express'
+import cors from 'cors'
+import dotenv from 'dotenv'
+import fs from 'fs'
+import path from 'path'
+import nodemailer from 'nodemailer'
+import PDFDocument from 'pdfkit'
+import { v4 as uuidv4 } from 'uuid'
+
+dotenv.config()
+
+const app = express()
+app.use(cors({ origin: true }))
+app.use(express.json({ limit: '25mb' })) // allow slightly larger payloads for PDF dataurls
+
+const OUT_DIR = process.env.OUT_DIR || 'submissions'
+fs.mkdirSync(OUT_DIR, { recursive: true })
+
+app.get('/', (req, res) => res.send('OSD server running'))
+
+app.post('/api/osd/submit', async (req, res) => {
+  try {
+    const data = req.body || {}
+    const ref = uuidv4().slice(0, 8)
+    const pdfPath = `${OUT_DIR}/OSD_${ref}.pdf`
+
+    await buildPDF(data, pdfPath)
+
+    const attachments = [{ filename: `OSD_${ref}.pdf`, path: pdfPath }]
+
+    // If a BOL PDF was uploaded, save and attach it as well
+    if (data.bolPdfDataUrl) {
+      try {
+        const base64 = data.bolPdfDataUrl.split(',')[1]
+        const buf = Buffer.from(base64, 'base64')
+        const bolPdfPath = `${OUT_DIR}/OSD_${ref}_BOL.pdf`
+        fs.writeFileSync(bolPdfPath, buf)
+        attachments.push({ filename: `BOL_${ref}.pdf`, path: bolPdfPath })
+      } catch (e) { console.warn('Failed to save bolPdfDataUrl:', e.message) }
+    }
+
+    // Email the PDFs (if SMTP configured)
+    if (process.env.SMTP_HOST) {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
+        auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined
+      })
+      const to = process.env.NOTIFY_TO || process.env.SMTP_USER
+      await transporter.sendMail({
+        from: process.env.MAIL_FROM || process.env.SMTP_USER,
+        to,
+        subject: `OSD Sign-Off ${ref}`,
+        text: `New OSD submission ${ref} from ${data.driverName || 'Driver'} at ${data.location || ''}.`,
+        attachments
+      })
+    }
+
+    res.json({ ok: true, ref })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: err.message || 'Server error' })
+  }
+})
+
+const PORT = process.env.PORT || 8080
+app.listen(PORT, () => console.log('Server on', PORT))
+
+async function buildPDF(data, filePath) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 40 })
+    const stream = fs.createWriteStream(filePath)
+    doc.pipe(stream)
+
+    doc.fontSize(20).text('OSD – Driver Sign-Off')
+    doc.moveDown(0.5)
+    doc.fontSize(10).fillColor('#475569').text(`Generated: ${new Date().toLocaleString()}`)
+    doc.moveDown()
+    doc.fillColor('#0f172a')
+
+    const row = (label, value='') => {
+      doc.font('Helvetica-Bold').text(label, { continued: true })
+      doc.font('Helvetica').text(' ' + (value || ''))
+    }
+
+    row('Date/Time:', fmtDate(data.date))
+    row('Location:', data.location)
+    row('Load ID / BOL #:', data.bol)
+    row('PO Number:', data.po)
+    row('Digital BOL Link / Load #:', data.bolLink)
+    row('Stop #:', data.stop)
+    row('Carrier:', data.carrier)
+    row('Vendor ID:', data.vendorId)
+    row('Vendor Name:', data.vendorName)
+
+    // BOL image if provided
+    if (data.bolPhotoDataUrl) {
+      try {
+        const base64 = data.bolPhotoDataUrl.split(',')[1]
+        const buf = Buffer.from(base64, 'base64')
+        doc.moveDown()
+        doc.font('Helvetica-Bold').text('BOL Image')
+        doc.image(buf, { fit: [520, 360], align: 'center' })
+      } catch {}
+    }
+
+    if (data.bolPdfDataUrl) {
+      doc.moveDown()
+      doc.font('Helvetica').text('BOL PDF provided (attached to email).')
+    }
+
+    doc.moveDown()
+    doc.font('Helvetica-Bold').text('Notes / Exceptions')
+    doc.font('Helvetica').text(data.notes || '(none)')
+    doc.moveDown()
+
+    doc.font('Helvetica-Bold').text('Driver Name: ', { continued: true })
+    doc.font('Helvetica').text(data.driverName || '')
+    doc.font('Helvetica-Bold').text('Driver ID: ', { continued: true })
+    doc.font('Helvetica').text(data.driverId || '')
+    doc.moveDown(0.5)
+
+    if (data.signatureDataUrl) {
+      try {
+        const base64 = data.signatureDataUrl.split(',')[1]
+        const buf = Buffer.from(base64, 'base64')
+        doc.text('Signature:')
+        doc.image(buf, { fit: [420, 120] })
+      } catch { doc.text('(signature failed to render)') }
+    } else {
+      doc.text('(no signature provided)')
+    }
+
+    if (Array.isArray(data.photos) && data.photos.length) {
+      doc.addPage().font('Helvetica-Bold').fontSize(16).text('Photos')
+      doc.moveDown()
+      for (const p of data.photos) {
+        const b64 = (p.dataUrl || '').split(',')[1]
+        if (!b64) continue
+        const img = Buffer.from(b64, 'base64')
+        try { doc.image(img, { fit: [520, 280], align: 'center' }) } catch {}
+        doc.moveDown()
+      }
+    }
+
+    doc.end()
+    stream.on('finish', resolve)
+    stream.on('error', reject)
+  })
+}
+
+function fmtDate(s) { try { return new Date(s).toLocaleString() } catch { return '' } }
+"""
+with open(os.path.join(server_dir, "server.js"), "w", encoding="utf-8") as f:
+    f.write(server_js)
+
+env_example = """# OUTPUT DIRECTORY FOR PDFs
+OUT_DIR=./submissions
+
+# SMTP settings (use Gmail/Outlook/SendGrid/Mailgun). For Gmail, create an App Password.
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=YOUR_EMAIL@example.com
+SMTP_PASS=YOUR_APP_PASSWORD
+MAIL_FROM="OSD Bot <YOUR_EMAIL@example.com>"
+NOTIFY_TO=osd@yourcompany.com
+"""
+with open(os.path.join(server_dir, ".env.example"), "w", encoding="utf-8") as f:
+    f.write(env_example)
+
+readme = """# OSD Web Form (Paperless-ready)
+
+✅ Door dropdown 100–140
+✅ Photo **or PDF** upload for BOL
+✅ Client-side **OCR** (when an image is uploaded)
+✅ Optional **Digital BOL Link / Load #** text field
+✅ Required: Driver Name, Carrier, Signature
+✅ Backend PDF generation + SMTP email + local storage
+✅ If BOL is a PDF, it is saved and **attached** to the email (not embedded)
+
+## Deploy backend (Render)
+- Root: `server/`
+- Build: `npm install`
+- Start: `node server.js`
+- Environment: copy `.env.example` and fill SMTP creds.
+
+## Host frontend
+- GitHub Pages or Netlify. Then set `BACKEND_URL` in `frontend/index.html`.
+"""
+with open(os.path.join(server_dir, "README.md"), "w", encoding="utf-8") as f:
+    f.write(readme)
+
+# Zip it
+zip_path = "/mnt/data/osd_webform_paperless_bundle.zip"
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+    for base, _, files in os.walk(root):
+        for file in files:
+            full = os.path.join(base, file)
+            arc = os.path.relpath(full, root)
+            z.write(full, arcname=arc)
+
+zip_path
