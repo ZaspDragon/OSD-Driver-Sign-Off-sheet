@@ -1,10 +1,3 @@
-# Update/build a new bundle that supports:
-# - Photo OR PDF upload for BOL (with image OCR when image is provided)
-# - Optional "Digital BOL Link / Load Number" text field
-# - Keeps door 100–140 dropdown, signature required, only Driver Name + Carrier + Signature mandatory
-# - Backend attaches BOL PDF if provided, embeds BOL photo into the generated PDF, and prints the link/number
-# Then zip for download.
-
 import os, json, zipfile, textwrap
 
 root = "/mnt/data/osd_webform_paperless"
