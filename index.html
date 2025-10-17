@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>OSD – Driver Sign-Off (Smart OCR + Barcode/QR + Fixed Signature)</title>
+<link rel="icon" href="data:,">
+<!-- OCR -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<!-- Multi-format barcode & QR -->
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+<style>
+  :root{--ink:#0f172a;--muted:#64748b;--line:#e5e7eb;--brand:#4f46e5}
+  *{box-sizing:border-box}
+  body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:#f6f7fb;color:var(--ink);margin:0}
+  .container{max-width:960px;margin:24px auto;padding:0 16px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.05);padding:16px;margin-bottom:16px}
+  h1{font-size:28px;margin:8px 0 16px}
+  label{display:block;font-size:13px;color:#475569;margin:8px 0 6px}
+  input,textarea,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px;outline:none;background:#fff}
+  input:focus,textarea:focus,select:focus{border-color:var(--brand)}
+  .grid{display:grid;gap:12px}
+  @media(min-width:820px){.grid-2{grid-template-columns:1fr 1fr}}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start}
+  .btn{background:var(--brand);color:#fff;border:none;border-radius:12px;padding:10px 16px;font-weight:600;cursor:pointer}
+  .btn-ghost{background:#eef2ff;color:#111827;border:none;border-radius:10px;padding:8px 12px;cursor:pointer}
+  .muted{color:var(--muted);font-size:12px}
+  .alert{padding:10px 14px;border-radius:12px;margin:10px 0;font-weight:600}
+  .alert.success{background:#e8f7ee;border:1px solid #31a24c;color:#166534}
+  .alert.error{background:#fdeaea;border:1px solid #dc2626;color:#7f1d1d}
+  .sig{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .sigbar{display:flex;justify-content:space-between;align-items:center;background:#f8fafc;border-bottom:1px solid var(--line);padding:8px 10px}
+  #sigCanvas{display:block;width:100%;height:180px;background:#f9fafb;touch-action:none}
+  .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:8px}
+  .thumbs img{width:100%;height:100px;object-fit:cover;border:1px solid var(--line);border-radius:8px}
+  pre{white-space:pre-wrap;background:#f1f5f9;border:1px solid var(--line);border-radius:12px;padding:10px;max-height:240px;overflow:auto;font-size:12px}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>OSD – Driver Sign-Off</h1>
+  <div id="alert"></div>
+
+  <form id="osdForm" class="card" novalidate>
+    <div class="grid grid-2">
+      <div>
+        <label>Date/Time</label>
+        <input type="datetime-local" id="date"/>
+      </div>
+      <div>
+        <label>Door Number *</label>
+        <select id="doorNumber" required></select>
+      </div>
+    </div>
+
+    <div class="row card">
+      <div class="field small">
+        <label>BOL #</label>
+        <input id="bol" placeholder="BOL #"/>
+      </div>
+      <div class="field small">
+        <label>PO #</label>
+        <input id="po" placeholder="PO #"/>
+      </div>
+      <div class="field">
+        <label>Trailer #</label>
+        <input id="trailer" placeholder="Trailer #"/>
+      </div>
+      <div class="field">
+        <label>Carrier *</label>
+        <input id="carrier" placeholder="Carrier" required/>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Upload or Take Photo of BOL <span id="ocrStatus" class="muted"></span></label>
+      <input type="file" id="bolFile" accept="image/*,application/pdf" capture="environment"/>
+      <div class="thumbs" id="bolPreview"></div>
+
+      <div class="row" style="margin-top:8px">
+        <button type="button" class="btn-ghost" id="autoFill">Auto-Fill (Smart OCR + QR)</button>
+        <button type="button" class="btn-ghost" id="boost">Boost Contrast</button>
+        <button type="button" class="btn-ghost" id="showText">Show OCR Text</button>
+      </div>
+
+      <div id="rawTextWrap" style="display:none;margin-top:8px">
+        <pre id="rawText"></pre>
+      </div>
+
+      <label style="margin-top:10px">Digital BOL Link / Load Number (optional)</label>
+      <input type="text" id="bolLink" placeholder="Paste link or enter load number"/>
+    </div>
+
+    <div class="row card">
+      <div class="field small">
+        <label>Vendor ID</label>
+        <input id="vendorId" placeholder="Vendor ID"/>
+      </div>
+      <div class="field">
+        <label>Vendor Name</label>
+        <input id="vendorName" placeholder="Vendor Name"/>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Notes / Exceptions</label>
+      <textarea id="notes" rows="4"></textarea>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>Driver Name *</label>
+        <input id="driverName" required/>
+      </div>
+      <div class="field">
+        <label>PRO # / Driver ID (optional)</label>
+        <input id="proNumber" placeholder="PRO # or License"/>
+      </div>
+    </div>
+
+    <div class="sig" style="margin-top:12px">
+      <div class="sigbar">
+        <span class="muted">Driver signature *</span>
+        <button type="button" class="btn-ghost" id="clearSig">Clear</button>
+      </div>
+      <canvas id="sigCanvas"></canvas>
+    </div>
+
+    <div style="margin-top:12px">
+      <label>Additional Photos (optional)</label>
+      <input type="file" id="photos" multiple accept="image/*"/>
+      <div class="thumbs" id="thumbs"></div>
+    </div>
+
+    <div class="row" style="justify-content:space-between;margin-top:12px">
+      <button type="button" class="btn-ghost" id="mailtoBtn">Send via Email</button>
+      <button class="btn" id="submitBtn">Submit</button>
+    </div>
+  </form>
+</div>
+
+<script>
+/* ====== helpers ====== */
+const BACKEND_URL = "https://osd-webform.onrender.com";
+const $ = id => document.getElementById(id);
+const alertBox = $('alert');
+const setAlert=(t,m)=>{alertBox.innerHTML=`<div class="alert ${t==='error'?'error':'success'}">${m}</div>`;setTimeout(()=>alertBox.innerHTML='',6000);}
+const setStatus = m => $('ocrStatus').textContent = m||'';
+const fill = (id,val)=>{ if(!val) return; const el=$(id); if(el && !el.value) el.value = String(val).trim(); };
+
+/* Prefill date */
+(() => { const d=new Date(),p=n=>String(n).padStart(2,'0'); $('date').value=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; })();
+
+/* Doors */
+(() => {
+  const s=$('doorNumber'); const def=document.createElement('option'); def.value=''; def.textContent='Select Door'; s.appendChild(def);
+  for(let i=1;i<=26;i++){const o=document.createElement('option');o.textContent=`Door ${i} – 6121 Bixby Rd`;o.value=o.textContent;s.appendChild(o);}
+  for(let i=1;i<=26;i++){const o=document.createElement('option');o.textContent=`Door ${i} – Other Building`;o.value=o.textContent;s.appendChild(o);}
+  for(let i=100;i<=140;i++){const o=document.createElement('option');o.textContent=`Door ${i}`;o.value=o.textContent;s.appendChild(o);}
+})();
+
+/* ====== Signature pad (robust: mouse + touch + HiDPI) ====== */
+let signatureDrawn = false;
+(() => {
+  const canvas = $('sigCanvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  let drawing = false;
+  let prevX = 0, prevY = 0;
+
+  function resizeCanvas() {
+    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    const rect = canvas.getBoundingClientRect();
+    canvas.width  = Math.floor(rect.width * ratio);
+    canvas.height = Math.floor(rect.height * ratio);
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.lineWidth = 2;
+    ctx.lineCap   = 'round';
+    ctx.lineJoin  = 'round';
+    ctx.strokeStyle = '#111827';
+  }
+  window.addEventListener('resize', resizeCanvas, { passive: true });
+  resizeCanvas();
+
+  function pointFromEvent(e) {
+    const rect = canvas.getBoundingClientRect();
+    const t = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return { x: t.clientX - rect.left, y: t.clientY - rect.top };
+  }
+
+  function start(e){
+    e.preventDefault();
+    drawing = true;
+    signatureDrawn = true;
+    const p = pointFromEvent(e);
+    prevX = p.x; prevY = p.y;
+  }
+  function move(e){
+    if(!drawing) return;
+    e.preventDefault();
+    const p = pointFromEvent(e);
+    ctx.beginPath();
+    ctx.moveTo(prevX, prevY);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    prevX = p.x; prevY = p.y;
+  }
+  function end(e){ if(drawing) e.preventDefault(); drawing = false; }
+
+  canvas.addEventListener('mousedown', start);
+  canvas.addEventListener('mousemove', move);
+  canvas.addEventListener('mouseup', end);
+  canvas.addEventListener('mouseleave', end);
+
+  canvas.addEventListener('touchstart', start, { passive:false });
+  canvas.addEventListener('touchmove',  move,  { passive:false });
+  canvas.addEventListener('touchend',   end,   { passive:false });
+  canvas.addEventListener('touchcancel',end,   { passive:false });
+
+  $('clearSig').addEventListener('click', ()=>{
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    signatureDrawn = false;
+  });
+})();
+
+/* ====== imaging utils ====== */
+function imgToCanvas(img, maxW=2200, contrast=false){
+  const scale=Math.min(1,maxW/img.width), w=Math.round(img.width*scale), h=Math.round(img.height*scale);
+  const c=document.createElement('canvas'); c.width=w; c.height=h; const ctx=c.getContext('2d');
+  ctx.drawImage(img,0,0,w,h);
+  if(contrast){
+    const im=ctx.getImageData(0,0,w,h),d=im.data;
+    for(let i=0;i<d.length;i+=4){const g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; const v=g>170?255:0; d[i]=d[i+1]=d[i+2]=v;}
+    ctx.putImageData(im,0,0);
+  }
+  return c;
+}
+function rotateCanvas(c,deg){
+  if(!deg) return c;
+  const r=deg*Math.PI/180, s=Math.abs(Math.sin(r)), co=Math.abs(Math.cos(r));
+  const out=document.createElement('canvas'); out.width=Math.floor(c.width*co+c.height*s); out.height=Math.floor(c.height*co+c.width*s);
+  const cx=out.getContext('2d'); cx.translate(out.width/2,out.height/2); cx.rotate(r); cx.drawImage(c,-c.width/2,-c.height/2); return out;
+}
+
+/* ====== layout-aware parsing ====== */
+function tokensToLines(words, tol=12){
+  const rows=[];
+  words.forEach(w=>{
+    const y=(w.bbox.y0+w.bbox.y1)/2;
+    let row=rows.find(r=>Math.abs(r.y-y)<tol);
+    if(!row){row={y,items:[]}; rows.push(row);}
+    row.items.push(w);
+  });
+  rows.forEach(r=>r.items.sort((a,b)=>a.bbox.x0-b.bbox.x0));
+  rows.sort((a,b)=>a.y-b.y);
+  return rows;
+}
+function grabRightOf(rows, labelRegex, maxChars=40){
+  for(const r of rows){
+    const lineTxt=r.items.map(w=>w.text).join(' ');
+    const m=lineTxt.match(labelRegex);
+    if(m){
+      let xCut=0, seen='';
+      for(const w of r.items){
+        if(!xCut){
+          seen += (seen? ' ':'') + w.text;
+          if(labelRegex.test(seen)) xCut=w.bbox.x1;
+        }else{
+          const chunk = r.items.filter(it=>it.bbox.x0 >= xCut).map(it=>it.text).join(' ');
+          return chunk.trim().slice(0,maxChars);
+        }
+      }
+    }
+  }
+  return '';
+}
+function bestLikeNumber(s){ const m=(s||'').match(/[A-Z0-9][A-Z0-9\-]{3,}/); return m?m[0]:''; }
+
+/* ====== main scan ====== */
+async function smartScan({contrast=false}={}){
+  const f=$('bolFile').files[0];
+  if(!f){ setAlert('error','Choose a BOL photo first.'); return; }
+  if(f.type==='application/pdf'){ setAlert('error','PDF OCR isn’t enabled in-browser. Upload an image/photo.'); return; }
+
+  const img=new Image(); img.src=URL.createObjectURL(f); await img.decode();
+  $('bolPreview').innerHTML=''; $('bolPreview').appendChild(img);
+
+  const base=imgToCanvas(img, 2200, contrast);
+  const canvases=[{c:base,deg:0},{c:rotateCanvas(base,90),deg:90},{c:rotateCanvas(base,-90),deg:-90}];
+
+  let parsed={}, rawDump=[];
+  // barcode/QR
+  let codeText='';
+  try{
+    const reader=new ZXing.BrowserMultiFormatReader();
+    const res=await reader.decodeFromImageElement(img);
+    codeText = (res && res.text) ? res.text : '';
+  }catch(e){ /* none */ }
+
+  for(const {c,deg} of canvases){
+    const rec = await Tesseract.recognize(c,'eng',{
+      preserve_interword_spaces:'1',
+      tessedit_pageseg_mode: 6,
+      tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-:/#.&() '
+    });
+    const words = (rec.data.words||[]).map(w=>({text:w.text, bbox:{x0:w.bbox.x0,y0:w.bbox.y0,x1:w.bbox.x1,y1:w.bbox.y1}})).filter(w=>w.text);
+    const rows = tokensToLines(words);
+
+    const bolRight = grabRightOf(rows, /(BOL|B\/L|Bill of Lading)\s*(No|#|:)?/i, 60);
+    const poRight  = grabRightOf(rows, /(PO|P\.?O\.?|Purchase\s*Order)\s*(No|#|:)?/i, 60);
+    const carRight = grabRightOf(rows, /(Carrier|Carrier Name|Motor Carrier|Company)\s*(No|#|:)?/i, 80);
+    const trlRight = grabRightOf(rows, /(Trailer|Trlr|TRL)\s*(No|#|:)?/i, 40);
+    const vidRight = grabRightOf(rows, /(Vendor\s*ID|VendorID)\s*(No|#|:)?/i, 40);
+    const vnmRight = grabRightOf(rows, /(Vendor\s*Name|Shipper|Consignor)\s*(No|#|:)?/i, 80);
+
+    const cand = {
+      bol: bestLikeNumber(bolRight),
+      po: bestLikeNumber(poRight),
+      carrier: (carRight||'').replace(/^[#:\-\s]+/,'').trim(),
+      trailer: bestLikeNumber(trlRight),
+      vendorId: bestLikeNumber(vidRight),
+      vendorName: (vnmRight||'').replace(/^[#:\-\s]+/,'').trim()
+    };
+
+    Object.entries(cand).forEach(([k,v])=>{ if(v && !parsed[k]) parsed[k]=v; });
+    rawDump.push(`--- rotation ${deg}° ---\n${rec.data.text}\n`);
+  }
+
+  if(codeText){
+    const up = codeText.toUpperCase();
+    const bolM = up.match(/BOL[:#\s\-]*([A-Z0-9\-]+)/);
+    const poM  = up.match(/PO[:#\s\-]*([A-Z0-9\-]+)/);
+    if(bolM) parsed.bol = parsed.bol || bolM[1];
+    if(poM)  parsed.po  = parsed.po  || poM[1];
+    if(!parsed.bol){ const m = up.match(/[A-Z0-9\-]{6,}/); if(m) parsed.bol = m[0]; }
+  }
+
+  fill('bol', parsed.bol);
+  fill('po', parsed.po);
+  fill('trailer', parsed.trailer);
+  fill('carrier', parsed.carrier);
+  fill('vendorId', parsed.vendorId);
+  fill('vendorName', parsed.vendorName);
+
+  $('rawText').textContent = (codeText?`[Barcode/QR]: ${codeText}\n\n`:``)+rawDump.join('\n');
+  if(Object.keys(parsed).length) setAlert('success','Auto-filled from photo.');
+  else setAlert('error','Couldn’t find the fields. Try Boost Contrast and retake a close, flat, glare-free photo.');
+}
+
+/* UI hooks */
+$('autoFill').onclick = ()=> smartScan({contrast:false});
+$('boost').onclick    = ()=> smartScan({contrast:true});
+$('showText').onclick = ()=> { const w=$('rawTextWrap'); w.style.display = w.style.display==='none'?'block':'none'; };
+$('bolFile').addEventListener('change', e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const img=new Image(); img.src=URL.createObjectURL(f);
+  img.onload=()=>{$('bolPreview').innerHTML='';$('bolPreview').appendChild(img);};
+});
+
+/* thumbs for optional photos */
+$('photos').addEventListener('change', e=>{
+  const wrap=$('thumbs'); wrap.innerHTML='';
+  [...e.target.files].forEach(f=>{const url=URL.createObjectURL(f); const im=new Image(); im.src=url; im.onload=()=>URL.revokeObjectURL(url); wrap.appendChild(im);});
+});
+
+/* mailto */
+$('mailtoBtn').onclick=()=>{
+  const subject=encodeURIComponent('OSD Driver Sign-Off');
+  const body=encodeURIComponent([
+    `Date/Time: ${$('date').value}`,
+    `Door: ${$('doorNumber').value}`,
+    `BOL: ${$('bol').value}`,
+    `PO: ${$('po').value}`,
+    `Trailer: ${$('trailer').value}`,
+    `Carrier: ${$('carrier').value}`,
+    `Vendor ID: ${$('vendorId').value}`,
+    `Vendor Name: ${$('vendorName').value}`,
+    `Driver: ${$('driverName').value}`,
+    `PRO/ID: ${$('proNumber').value}`,
+    `BOL Link: ${$('bolLink').value}`,
+    `Notes: ${$('notes').value}`
+  ].join('\n'));
+  window.location.href=`mailto:?subject=${subject}&body=${body}`;
+};
+
+/* submit */
+$('submitBtn').onclick=async(e)=>{
+  e.preventDefault();
+  if(!$('doorNumber').value||!$('driverName').value||!$('carrier').value)
+    return setAlert('error','Please complete required fields.');
+
+  if(!signatureDrawn)
+    return setAlert('error','Driver signature is required.');
+
+  const fd=new FormData();
+  ['date','doorNumber','bol','po','trailer','carrier','vendorId','vendorName','notes','driverName','proNumber','bolLink']
+    .forEach(k=>fd.append(k,$(k).value||''));
+  fd.append('signature',$('sigCanvas').toDataURL('image/png'));
+  if($('bolFile').files[0]) fd.append('bolFile',$('bolFile').files[0]);
+  [...$('photos').files].forEach(f=>fd.append('photos',f));
+  try{
+    const res=await fetch(BACKEND_URL+'/submit',{method:'POST',body:fd});
+    if(res.ok) setAlert('success','Submitted.');
+    else setAlert('error','Submission failed.');
+  }catch{ setAlert('error','Network error.'); }
+};
+</script>
+</body>
+</html>
